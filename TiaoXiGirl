@@ -1,0 +1,218 @@
+//package com.sogou.stat;
+
+
+import com.hadoop.mapreduce.LzoTextInputFormat;
+// import com.sogou.stat.common.util.DateUtils;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import utils.DateUtils;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.LazyOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
+import org.htuple.ShuffleUtils;
+import org.htuple.Tuple;
+import org.mortbay.log.Log;
+
+// input: /user/go2maplog/logs/client_log/2015_02_09
+// output: dje/output/sq-output
+// local
+// input:
+// output:
+public class NaStatMr extends Configured implements Tool {
+
+    // enum TupleFields {
+    // DATE, FROMSQ, EVENT, UVID
+    // }
+    /*
+    enum TupleFields {
+        FROMSQ, EVENT, UVID
+    }
+    */
+    enum TupleFields {
+        FROMSQ, DATE, UVID
+    }
+
+
+    static public class SQActivityStatMapper
+            extends Mapper<Object, Text, Tuple, NullWritable> {
+        private Tuple _keyOut = new Tuple();
+        final static Pattern TIME_PATTERN =
+                Pattern.compile("time=(\\d{13})");
+        //String tag = "weixingo2map,sousuo,daohang,shoushu,qqshuru,haomatong,wenwen,shoujizhushou,bizhi,baike,xingchen,haha,ceshi,lianmeng,pushios,pushandroid,pushxiaomi,ClientSq,happy";
+
+        //HashSet<String> _FromSet = new HashSet<String>(Arrays.asList("weixingo2map", "sousuo", "daohang", "shoushu", "qqshuru", "haomatong", "wenwen", "shoujizhushou", "bizhi", "baike", "xingchen", "haha", "lianmeng", "pushios", "pushxiaomi","ClientSq", "happy"));
+        @Override
+        public final void map(Object key, Text value, Context context)
+                throws IOException, InterruptedException {
+            String valStr = value.toString();
+
+            String date = null;
+            String fromSQ = null;
+            String event = null;
+            String uvid = null;
+
+            String deviceSystem = null;
+            if (valStr.indexOf("event=pageloadQ") > 0) {
+                int start = valStr.indexOf("fromSQ=");
+                int end = valStr.indexOf("\t", start);
+                if (start != -1 && end != -1) {
+                    start += "fromSQ=".length();
+                    fromSQ = valStr.substring(start, end);
+                    if (fromSQ.equals("ClientSq")) {
+                        start = valStr.indexOf("deviceSystem=");
+                        end = valStr.indexOf("\t", start);
+                        if (start != -1 && end != -1) {
+                            start += "deviceSystem=".length();
+                            deviceSystem = valStr.substring(start, end);
+                            fromSQ = deviceSystem + "-" + fromSQ;
+                        }
+                    }
+                    //if (_FromSet.contains(fromSQ)) {
+                    if (true) {
+                        Matcher matcher = TIME_PATTERN.matcher(valStr);
+                        if (matcher.find()) {
+                            long time = Long.parseLong(matcher.group(1));
+                            date = DateUtils.longToDateStr(time, "yyyy-MM-dd");
+                        }
+                        start = valStr.indexOf("uvid=");
+                        end = valStr.indexOf("\t", start);
+                        if (start != -1 && end != -1) {
+                            start += "uvid=".length();
+                            uvid = valStr.substring(start, end);
+                            Log.info("****uvid:" + uvid);
+                        }
+
+                        // if (date != null && null != fromSQ && null != uvid && null != event) {
+                        if (null != fromSQ && uvid != null && date != null) {
+                            // _keyOut.setString(TupleFields.DATE, date);
+                            _keyOut.setString(TupleFields.FROMSQ, fromSQ);
+                            _keyOut.setString(TupleFields.DATE, date);
+                            _keyOut.setString(TupleFields.UVID, uvid);
+                            context.write(_keyOut, NullWritable.get());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    static public class SQActivityStatReducer
+            extends Reducer<Tuple, NullWritable, Text, NullWritable> {
+        private Text _keyOut = new Text();
+
+        @Override
+        public final void reduce(Tuple key, Iterable<NullWritable> values, Context context)
+                throws IOException, InterruptedException {
+            String date = key.getString(TupleFields.DATE);
+            String fromSQ = key.getString(TupleFields.FROMSQ);
+            //String event = key.getString(TupleFields.EVENT);
+            int pvCnt = 0;
+            int uvCnt = 0;
+            String preUvid = null;
+            String curUvid = null;
+            Log.info("_________________________" + fromSQ + "\t");
+            for (NullWritable value : values) {
+                curUvid = key.getString(TupleFields.UVID);
+                if (!curUvid.equals(preUvid)) {
+                    Log.info("curuvid:" + curUvid + "preuvid:" + preUvid);
+                    uvCnt++;
+                }
+                pvCnt++;
+                preUvid = curUvid;
+            }
+            _keyOut.set(date + "\t" + fromSQ + "\t" + uvCnt + "\t" + pvCnt);
+            context.write(_keyOut, NullWritable.get());
+        }
+    }
+
+    public static void setupSecondarySort(Configuration conf) {
+        ShuffleUtils.configBuilder()
+                .useNewApi()
+                .setPartitionerIndices(TupleFields.FROMSQ, TupleFields.DATE)
+                .setSortIndices(TupleFields.values())
+                .setGroupIndices(TupleFields.FROMSQ, TupleFields.DATE)
+                .configure(conf);
+    }
+
+    public int run(String[] args) throws Exception {
+        for (int i = 0; i < args.length; i++) {
+            System.out.println("args[" + i + "]" + args[i]);
+        }
+
+        if (args.length < 2) {
+            System.err.println("Usage: hadoop jar path/to/this.jar " + getClass() + " <input dir> <output dir>");
+            return -1;
+        }
+
+        Configuration conf = new Configuration();
+        if (args[args.length - 1].equals("p")) {
+            conf.set("io.compression.codecs",
+                    "com.hadoop.compression.lzo.LzopCodec");
+            conf.setBoolean("mapred.compress.map.output", true);
+            conf.set("mapred.map.output.compression.codec", "org.apache.hadoop.io.compress.SnappyCodec");
+        }
+        setupSecondarySort(conf);
+
+        Job job = new Job(conf, "TiaoXiG stat");
+
+
+        job.setJarByClass(NaStatMr.class);
+
+        for (int i = 0; i < args.length - 2; i++) {
+            FileInputFormat.addInputPath(job, new Path(args[i]));
+        }
+
+        if (args[args.length - 1].equals("p")) {
+            job.setInputFormatClass(LzoTextInputFormat.class);
+        } else {
+            job.setInputFormatClass(TextInputFormat.class);
+        }
+
+        job.setMapperClass(SQActivityStatMapper.class);
+        job.setReducerClass(SQActivityStatReducer.class);
+
+        job.setMapOutputKeyClass(Tuple.class);
+        job.setMapOutputValueClass(NullWritable.class);
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(NullWritable.class);
+        job.setNumReduceTasks(1);
+
+        LazyOutputFormat.setOutputFormatClass(job, TextOutputFormat.class);
+        job.setOutputFormatClass(TextOutputFormat.class);
+        // job.getConfiguration().setBoolean("mapred.map.tasks.speculative.execution", false);
+
+        Path output = new Path(args[args.length - 2]);
+        FileOutputFormat.setOutputPath(job, output);
+        FileSystem fs = FileSystem.get(conf);
+        fs.delete(output, true);
+        job.waitForCompletion(true);
+
+        return 0;
+    }
+
+    public static void main(String[] args) throws Exception {
+        int res = ToolRunner.run(new Configuration(), new NaStatMr(), args);
+        System.exit(res);
+    }
+
+}
